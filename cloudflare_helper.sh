@@ -1,8 +1,10 @@
-: "${CF_API_TOKEN:?CF_API_TOKEN is not set}"
-: "${DOMAIN:?DOMAIN is not set}"
+#!/bin/bash
+read -r -p "Cloudflare API token: " CF_API_TOKEN
+echo
+read -r -p "Domain [example.com]: " DOMAIN
+echo
 
 # Hard coded varialbes
-CF_API="https://api.cloudflare.com/client/v4"
 A_SUBDOMAIN="ns"
 NS_SUBDOMAINS=(
     "t"
@@ -15,13 +17,13 @@ NS_SUBDOMAINS=(
 )
 FULL_SUBDOMAINS=(
     "${NS_SUBDOMAINS[@]/%/.${DOMAIN}}"
-    "${A_SUBDOMAIN[@]/%/.${DOMAIN}}"
+    "${A_SUBDOMAIN}/%/.${DOMAIN}"
 )
 
 # Functions
 
 get_ip() {
-    curl -fsSL ip.me
+    curl -4 -fsSL ip.me
 }
 
 get_zone_id() {
@@ -29,6 +31,17 @@ get_zone_id() {
         -H "Authorization: Bearer ${CF_API_TOKEN}" \
         -H "Content-Type: application/json" | jq -r '.result[0].id'
 }
+
+PUBLIC_IP=$(get_ip)
+ZONE_ID=$(get_zone_id)
+
+# gurad to check variables
+[[ -n "$ZONE_ID" && "$ZONE_ID" != "null" ]] || {
+    echo "Failed to get ZONE_ID for domain: $DOMAIN"
+    exit 1
+}
+: "${CF_API_TOKEN:?CF_API_TOKEN is not set}"
+: "${DOMAIN:?DOMAIN is not set}"
 
 #
 confirm_or_abort() {
@@ -46,16 +59,13 @@ confirm_or_abort() {
 }
 
 check_conflicting_records() {
-
-    local full_subdomains=("$@")
-
     local conflict
     local conflict_record_ids
     local conflict_found=false
 
     conflict="$(
         curl -sS -X GET \
-            "${CF_API}/zones/${ZONE_ID}/dns_records?per_page=5000" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?per_page=5000" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" | jq -r --argjson targets "$(printf '%s\n' "${FULL_SUBDOMAINS[@]}" | jq -R . | jq -s .)" '
 	      .result
@@ -83,10 +93,9 @@ check_conflicting_records() {
 
     if [[ -n "$conflict" ]]; then
         conflict_found=true
-        # TODO: only in interactive mode
-        #echo "Conflicting records was found!"
-        #echo "$conflict"
-        #confirm_or_abort "Delete the existing records and create new ones? [y/N]: "
+        echo "Conflicting records was found!"
+        echo "$conflict"
+        confirm_or_abort "Delete the conflicting records and create new ones? [y/N]: "
 
         conflict_record_ids="$(
             printf '%s\n' "$conflict" |
@@ -94,15 +103,15 @@ check_conflicting_records() {
                 sed 's/.*id: //'
         )"
 
-        delete_conflicting_records conflict_record_ids
+        delete_conflicting_records "$conflict_record_ids"
 
     else
         conflict_found=false
     fi
 }
 
-delete_conflicting_records() 
-    local record_ids=("$@")
+delete_conflicting_records() {
+    local record_ids_str=("$1")
 
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
@@ -119,10 +128,9 @@ delete_conflicting_records()
             echo "Failed to delete record id: $id"
             echo "$response"
         fi
-    done <<<"$record_ids"
+    done <<<"$record_ids_str"
 }
 
-# TODO: This function is not been used in the logic for now but it can be later
 delete_all_existing_records() {
     curl -sS -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?per_page=5000" \
         -H "Authorization: Bearer ${CF_API_TOKEN}" \
@@ -146,7 +154,6 @@ delete_all_existing_records() {
         done
 }
 
-# TODO: This should be available only in interactive mode which hasn't been implemented yet!
 preview_batch_and_confirm() {
     local batch_payload="$1"
 
@@ -163,6 +170,13 @@ preview_batch_and_confirm() {
 		.type + "  " + .name + " -> " + .content
 	      end
 	  '
+    printf "%s Continue? [y/N]: "
+    read -r answer
+
+    case "$answer" in
+    y | Y | yes | YES | Yes) return 0 ;;
+    *) return 1 ;;
+    esac
 }
 
 create_records_batch_mode() {
@@ -198,13 +212,19 @@ create_records_batch_mode() {
     }'
     )"
 
-    # TODO: if the interactive mode was implemented
-    #if preview_batch_and_confirm "$BATCH_PAYLOAD"; then
+    if preview_batch_and_confirm "$BATCH_PAYLOAD"; then
 
-    curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/batch" \
-        -H "Authorization: Bearer ${CF_API_TOKEN}" \
-        -H "Content-Type: application/json" \
-        --data "$BATCH_PAYLOAD"
+        curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/batch" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "$BATCH_PAYLOAD" | jq -r '.success'
 
-    #fi
+    fi
 }
+
+run() {
+    check_conflicting_records
+    create_records_batch_mode
+
+}
+run
