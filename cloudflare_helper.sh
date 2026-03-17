@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Install requirement
+apt update -qq && apt install curl jq -y -qq
+
 read -r -p "Cloudflare API token: " CF_API_TOKEN
 echo
 read -r -p "Domain [example.com]: " DOMAIN
